@@ -38,6 +38,7 @@
 using namespace std;
 using namespace OpenMM;
 
+typedef int    ivec[3];
 const float CpuNonbondedForce::TWO_OVER_SQRT_PI = (float) (2/sqrt(PI_M));
 const int CpuNonbondedForce::NUM_TABLE_POINTS = 2048;
 
@@ -242,7 +243,8 @@ void CpuNonbondedForce::tabulateExpTerms() {
 
 void CpuNonbondedForce::calculateReciprocalIxn(int numberOfAtoms, float* posq, const vector<Vec3>& atomCoordinates,
                                                const vector<pair<float, float> >& atomParameters, const vector<float> &C6params, const vector<set<int> >& exclusions,
-                                               vector<Vec3>& forces, double* totalEnergy) const {
+                                               vector<Vec3>& forces, double* totalEnergy, double* vext_grid, vector<vector<int>>& particleindex, vector<int>& ngrid ) const {
+
     typedef std::complex<float> d_complex;
 
     static const float epsilon     =  1.0;
@@ -252,9 +254,19 @@ void CpuNonbondedForce::calculateReciprocalIxn(int numberOfAtoms, float* posq, c
     float TWO_PI                   = 2.0 * PI_M;
     float recipCoeff               = (float)(ONE_4PI_EPS0*4*PI_M/(periodicBoxVectors[0][0] * periodicBoxVectors[1][1] * periodicBoxVectors[2][2]) /epsilon);
 
+    // I'd rather not keep checking for null pointer, so let's introduce boolean
+    bool compute_vext_grid=false;
+    if(vext_grid){ compute_vext_grid=true; }
+
     if (pme) {
         pme_t pmedata;
-        pme_init(&pmedata, alphaEwald, numberOfAtoms, meshDim, 5, 1);
+
+       // if computing vext grid, call overloaded pme_init for this setup
+        if(compute_vext_grid)
+            { pme_init(&pmedata,alphaEwald,numberOfAtoms,meshDim,5,1,compute_vext_grid);}
+        else
+            { pme_init(&pmedata,alphaEwald,numberOfAtoms,meshDim,5,1);}
+
         vector<double> charges(numberOfAtoms);
         for (int i = 0; i < numberOfAtoms; i++)
             charges[i] = posq[4*i+3];
@@ -262,7 +274,26 @@ void CpuNonbondedForce::calculateReciprocalIxn(int numberOfAtoms, float* posq, c
         pme_exec(pmedata, atomCoordinates, forces, charges, periodicBoxVectors, &recipEnergy);
         if (totalEnergy)
             *totalEnergy += recipEnergy;
-        pme_destroy(pmedata);
+
+        // Computing Vext grid.  We need to copy over several pme data structures and save
+        // locally before call to pme_destroy(pmedata)
+        if (compute_vext_grid)
+        {
+            // grid size
+            pme_return_gridsize(pmedata, ngrid);
+            int nx = ngrid[0];
+            int ny = ngrid[1];
+            int nz = ngrid[2];
+
+            // copy particle grid indices
+            pme_copy_particleindex( pmedata, particleindex );
+
+            // save electrostatic potential on PME grid, before pme_destroy
+            // copy pme grid over to vext_grid.  After call of pme_exec, pme grid should by default store the external potential
+            pme_copy_grid_real( pmedata, vext_grid );
+        }
+
+	pme_destroy(pmedata);
 
         if (ljpme) {
             // Dispersion reciprocal space terms

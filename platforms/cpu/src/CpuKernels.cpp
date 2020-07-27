@@ -71,6 +71,35 @@ static vector<Vec3>& extractForces(ContextImpl& context) {
     return *((vector<Vec3>*) data->forces);
 }
 
+
+bool extractReferenceVextGrid(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    ReferencePlatform& platform = reinterpret_cast<ReferencePlatform&>(context.getPlatform());
+    std::map<std::string, std::string>& properties = data->propertyValues;
+
+    string ReferenceVextGridValue = (properties.find(platform.ReferenceVextGrid()) == properties.end() ?
+            platform.getPropertyDefaultValue(platform.ReferenceVextGrid()) : properties.find(platform.ReferenceVextGrid())->second);
+    transform(ReferenceVextGridValue.begin(), ReferenceVextGridValue.end(), ReferenceVextGridValue.begin(), ::tolower);
+    return (ReferenceVextGridValue == "true");
+}
+
+
+static double* extractVext_grid(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return data->vext_grid;
+}
+
+static vector<Vec3>& extractPME_grid_positions(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return *((vector<Vec3>*) data->PME_grid_positions);
+}
+
+const vector<int>& extractQMexclude(ContextImpl& context) {
+    ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
+    return data->QMexclude;
+}
+
+
 static Vec3& extractBoxSize(ContextImpl& context) {
     ReferencePlatform::PlatformData* data = reinterpret_cast<ReferencePlatform::PlatformData*>(context.getPlatformData());
     return *(Vec3*) data->periodicBoxSize;
@@ -649,6 +678,19 @@ double CpuCalcNonbondedForceKernel::execute(ContextImpl& context, bool includeFo
             }
         }
     }
+
+    // data structures for computing vext_grid, make sure to free these at return!
+    std::vector<int> ngrid(3);    // number of PME grid points
+    vector<vector<int>> particleindex( numParticles , vector<int>(3))   ; // atom grid indices
+
+
+    // if computing vext_grid
+    bool ReferenceVextGrid = extractReferenceVextGrid(context);
+    vector<Vec3>& PME_grid_positions = extractPME_grid_positions(context);
+
+    const vector<int>& QMexclude = extractQMexclude(context);
+    //printf("%s", ReferenceVextGrid ? "true" : "false");
+
     computeParameters(context, true);
     copyChargesToPosq(context, charges, chargePosqIndex);
     AlignedArray<float>& posq = data.posq;
@@ -694,7 +736,7 @@ double CpuCalcNonbondedForceKernel::execute(ContextImpl& context, bool includeFo
             }
         }
         else
-            nonbonded->calculateReciprocalIxn(numParticles, &posq[0], posData, particleParams, C6params, exclusions, forceData, includeEnergy ? &nonbondedEnergy : NULL);
+            nonbonded->calculateReciprocalIxn(numParticles, &posq[0], posData, particleParams, C6params, exclusions, forceData, includeEnergy ? &nonbondedEnergy : NULL, ReferenceVextGrid ? extractVext_grid(context) : NULL, particleindex , ngrid );
     }
     energy += nonbondedEnergy;
     if (includeDirect) {

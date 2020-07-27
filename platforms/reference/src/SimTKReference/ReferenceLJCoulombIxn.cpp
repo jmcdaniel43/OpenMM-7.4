@@ -564,76 +564,14 @@ void ReferenceLJCoulombIxn::calculateEwaldIxn(int numberOfAtoms, vector<Vec3>& a
         return;
 
 
-    /* Computing Electrostatic Potential on PME grid, already have reciprocal space, now do real space ... */
+    /* Computing Electrostatic Potential on PME grid, already have reciprocal space ... */
     // pme grid stores electrostatic potential after calls to
     //     pme_reciprocal_convolution(pme,periodicBoxVectors,recipBoxVectors,energy);
     //     fftpack_exec_3d(pme->fftplan,FFTPACK_BACKWARD,pme->grid,pme->grid);
 
-    int nx = ngrid[0];
-    int ny = ngrid[1];
-    int nz = ngrid[2];
 
-  
-    // get reciprocal box vectors
-    Vec3 recipBoxVectors[3];
-    invert_box_vectors(periodicBoxVectors , recipBoxVectors);
-    // maximum grid displacements corresponding to realspace cutoff distance
-    int dgrid[3];
-    for (int i =0; i < 3; i++){
-        double recip_norm = sqrt( recipBoxVectors[0][i]*recipBoxVectors[0][i] + recipBoxVectors[1][i]*recipBoxVectors[1][i] + recipBoxVectors[2][i]*recipBoxVectors[2][i]);
-        dgrid[i] = floor( cutoffDistance*recip_norm*ngrid[i] ) + 1;
-    }
-
-
-    // Use neighbor list to find atoms within cutoff from QM region.  Fill a vector with all neighbors
-    // of every atom in the QMregion, and use these for real-space interactions with the PMEgrid
-
-    printf(" searching for QM neighbors from system neighbor list ...\n");
-
-    std::unordered_set<int> QMneighbors;  // data structure which we will fill with neighbors of QM region.
-//****** first add QMexclude atoms to QMneighbors
-    for(int i=0; i < QMexclude.size(); i++) {
-        int index = QMexclude[i];
-        QMneighbors.insert(index);
-    }
-
-// *******    This collects neighbors from entire QM region.  Note there's a lot of vector searching,
-// *******    so will be slow---if this is a problem, could force QMexclude to be ordered, then use binary search...
-    for (auto& pair : *neighborList) {
-        int ii = pair.first;
-        int jj = pair.second;
-        if ( std::find(QMexclude.begin(), QMexclude.end(), ii) != QMexclude.end() ) {
-            // this is QMregion atom, insert (only if not in set)
-             QMneighbors.insert(jj);
-        }
-        else if ( std::find(QMexclude.begin(), QMexclude.end(), jj) != QMexclude.end() ) {
-            // this is QMregion atom, insert (only if not in set)
-            QMneighbors.insert(ii);
-        }
-    }
-
-    printf(" done searching for QM neighbors\n");
-
-    // Keep track of exclusions from QM region.  Don't include contribution to vext grid from QM atoms,
-    // need to subtract off these contributions from reciprocal space
-    // not the cleanest way to do it, but we introduce new data structure with zero's and one's ...
-
-    int* QMexclusion_flag;       // QM_exclusions
-    QMexclusion_flag = (int *) malloc(sizeof(int)*numberOfAtoms);
-    // initialize data structure with zero's...
-    for (int i =0; (i < numberOfAtoms); i++)
-        QMexclusion_flag[i] = 0;
-    // set to 1's for QM atoms
-    for(int i=0; i < QMexclude.size(); i++) {
-        int index = QMexclude[i];
-        QMexclusion_flag[index]=1;
-    }
-
-    /*   
-    printf(" ********** QM exclusion map ************** \n");
-    for (int i =0; (i < numberOfAtoms); i++)
-        printf( "%d  %d \n" , i, QMexclusion_flag[i] );
-    */
+    /* real space will now be done in Python layer, and real-space correction originally in C++ have been deleted below */
+    /* we still need to compute PME_grid_positions ... */
 
     // Store absolute positions of PME grid cells
     for (int ia = 0; ia < ngrid[0] ; ia++){
@@ -655,104 +593,8 @@ void ReferenceLJCoulombIxn::calculateEwaldIxn(int numberOfAtoms, vector<Vec3>& a
         }
     }
 
-
-
-    // compute real-space contribution to vext grid, and add to previously stored reciprocal space contribution.
-    //for (int i = 0; (i < numberOfAtoms); i++) {
-    for (auto& i : QMneighbors) {
-        double q_i = atomParameters[i][QIndex];
-        Vec3 r_i = atomCoordinates[i];
-
-        // nearest PME grid point of atom
-        int ix = particleindex[i][0];
-        int iy = particleindex[i][1];
-        int iz = particleindex[i][2];
-
-
-        int igrid[3];
-        // fill in contribution to vext to all grid points within realspace cutoff of this atom
-        for (int ia = -dgrid[0]; ia < dgrid[0] + 1; ia++){
-            for (int ib = -dgrid[1]; ib < dgrid[1] + 1; ib++){
-                for (int ic = -dgrid[2]; ic < dgrid[2] + 1; ic++){
-
-                    // use trick in ReferencePME.cpp to avoid conditionals on PBC search ...
-                    igrid[0] = ( ix + ia + ngrid[0] ) % ngrid[0] ;
-                    igrid[1] = ( iy + ib + ngrid[1] ) % ngrid[1] ;
-                    igrid[2] = ( iz + ic + ngrid[2] ) % ngrid[2] ;
-
-                    int index = igrid[0]*ngrid[1]*ngrid[2] + igrid[1]*ngrid[2] + igrid[2];
-
-                    // get real space distance from atom to this grid point
-                    Vec3 r_grid;
-                    for(int k=0; k<3; k++)
-                        r_grid[k] = PME_grid_positions[index][k];
-                    
-                    // minimum image, see comments above about orthrhombic box limitation
-                    Vec3 dr = ReferenceForce::getDeltaRPeriodic( r_grid , r_i , periodicBoxVectors );
-                    double inverseR = 1.0 / sqrt(dr.dot(dr));
-                    double alphaR = alphaEwald / inverseR ;  // just alpha * r 
-
-                    // extremely rare to have a divide by zero if particle is exactly on PME grid.
-                    // this will almost never happen, so hopefully following conditional is harmless in terms
-                    // of speed/slowdown, but better throw an exception rather than not do anything...
-                    if ( alphaR < 1e-6 )
-                        throw OpenMMException("particle is exactly on PMEgrid, vext will diverge!");
-
-
-                    if ( QMexclusion_flag[i] != 1 ){
-                        // Not QM exclusion, add real space, subtract recip space
-                        vext_grid[index] += ONE_4PI_EPS0*q_i*inverseR*erfc(alphaR);
-                    }
-
-                }
-            }
-        }
-
-
-        //**************** For QMatoms, subtract off contribution for all grid points ******
-        //   note that putting this in the above loop would be dangerous, as above loop only considers interactions
-        //   with grid points within dgrid of atom.  Numerical quadrature can extend long range, e.g. > 1 nanometer ,
-        //   and so it's safer to subtract QMatom contribution from ALL grid points to avoid any chance of self-interaction...
-        if ( QMexclusion_flag[i] == 1 ){
-
-            for (int ia = 0; ia < ngrid[0] ; ia++){
-                for (int ib = 0; ib < ngrid[1] ; ib++){
-                    for (int ic = 0; ic < ngrid[2] ; ic++){
-                        igrid[0] = ia ;
-                        igrid[1] = ib ;
-                        igrid[2] = ic ;
-
-                        int index = igrid[0]*ngrid[1]*ngrid[2] + igrid[1]*ngrid[2] + igrid[2];
-                        // get real space distance from atom to this grid point
-                        Vec3 r_grid;
-                        for(int k=0; k<3; k++)
-                            r_grid[k] = PME_grid_positions[index][k];
-                        // minimum image, see comments above about orthrhombic box limitation
-                        Vec3 dr = ReferenceForce::getDeltaRPeriodic( r_grid , r_i , periodicBoxVectors );
-                        double inverseR = 1.0 / sqrt(dr.dot(dr));
-                        double alphaR = alphaEwald / inverseR ;  // just alpha * r
-
-                        if (erf(alphaR) > 1e-6) {
-                            vext_grid[index] -= ONE_4PI_EPS0*q_i*inverseR*erf(alphaR);
-                        }
-                        else{
-                            vext_grid[index] -= alphaEwald*TWO_OVER_SQRT_PI*ONE_4PI_EPS0*q_i;
-                        }
-
-                    }
-                }
-            }    
-
-        }
-
-    }
-
-
-
     /*   Free allocated memory from copied PME data structures */
     free(particleindex);
-    // temporary data structure
-    free(QMexclusion_flag);
 }
 
 
